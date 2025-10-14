@@ -3,7 +3,7 @@ import logging
 import math
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from kademlia.protocol import KademliaProtocol
 from kademlia.node import Node
@@ -48,9 +48,16 @@ class KademliaExtend(KademliaProtocol):
         if not hasattr(self.source_node, "meta") or self.source_node.meta is None:
             self.source_node.meta = {}
         self._server = None
+        self._relay_manager = None
 
     def attach_server(self, server) -> None:
         self._server = server
+
+    def attach_relay_manager(self, manager) -> None:
+        """Optional helper để tích hợp với lớp quản lý relay bên ngoài."""
+        self._relay_manager = manager
+        if self._relay_manager:
+            self._relay_manager.attach_protocol(self)
 
     def _update_local_meta(self, meta):
         if isinstance(meta, dict) and meta:
@@ -69,6 +76,11 @@ class KademliaExtend(KademliaProtocol):
         if ip is None or port is None:
             return None
         return (ip, port)
+
+    @staticmethod
+    def _should_use_relay(node) -> bool:
+        meta = getattr(node, "meta", None) or {}
+        return bool(meta.get("use_relay") or meta.get("is_nat") or meta.get("force_relay"))
 
     @staticmethod
     def _meta_payload(node):
@@ -100,13 +112,36 @@ class KademliaExtend(KademliaProtocol):
             "meta": self._meta_payload(self.source_node),
         }
 
+    async def _send_via_relay(self, method: str, node, args: Iterable[Any]):
+        if not self._relay_manager:
+            log.debug("relay manager chưa được gắn, fallback sang UDP cho %s", node)
+            return None
+        try:
+            return await self._relay_manager.send_rpc(method, node, args)
+        except Exception:
+            log.exception("relay manager gửi %s thất bại, fallback sang UDP cho %s", method, node)
+            return None
+
+    async def _send_rpc(self, method, node, *args):
+        address = self._address_for_node(node)
+        if address is None:
+            raise ValueError("Cannot resolve address for node")
+        if self._should_use_relay(node):
+            relay_result = await self._send_via_relay(method, node, args)
+            if relay_result is not None:
+                return relay_result
+        rpc = getattr(self, method)
+        return await rpc(address, *args)
+
     async def call_ping(self, node_to_ask):
-        address = self._address_for_node(node_to_ask)
-        result = await self.ping(
-            address,
+        target_meta = self._meta_payload(node_to_ask)
+        source_meta = self._meta_payload(self.source_node)
+        result = await self._send_rpc(
+            "ping",
+            node_to_ask,
             self.source_node.id,
-            self._meta_payload(node_to_ask),
-            self._meta_payload(self.source_node),
+            target_meta,
+            source_meta,
         )
         if result[0] and isinstance(result[1], dict):
             payload = result[1]

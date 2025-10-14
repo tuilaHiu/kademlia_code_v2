@@ -7,8 +7,11 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, Optional, Tuple
 
+import asyncio
+
 from kademlia.network import Server
 from kademliaExtend import KademliaExtend
+from nat_utils import detect_nat_info
 
 log = logging.getLogger(__name__)
 
@@ -19,17 +22,65 @@ class ExtendedServer(Server):
     protocol_class = KademliaExtend
 
     def __init__(self, *args, **kwargs):
+        self._auto_detect_nat = kwargs.pop("auto_detect_nat", False)
+        self._nat_options = kwargs.pop("nat_options", {}) or {}
         super().__init__(*args, **kwargs)
         self._incoming_transfers: Dict[str, Dict[str, Any]] = {}
         self._completed_transfers: Dict[str, Dict[str, Any]] = {}
         self._recent_payloads: Deque[Tuple[float, Any, Any]] = deque(maxlen=100)
+        self._relay_manager = None
+        self._nat_task: Optional[asyncio.Task] = None
 
     def _create_protocol(self):
         protocol = self.protocol_class(self.node, self.storage, self.ksize)
         attach = getattr(protocol, "attach_server", None)
         if callable(attach):
             attach(self)
+        if self._relay_manager is not None:
+            protocol.attach_relay_manager(self._relay_manager)
         return protocol
+
+    def attach_relay_manager(self, manager):
+        """Gắn RelayManager để dùng relay WebSocket."""
+        self._relay_manager = manager
+        if self.protocol is not None:
+            self.protocol.attach_relay_manager(manager)
+
+    async def listen(self, port, interface="0.0.0.0"):
+        await super().listen(port, interface)
+        if self._auto_detect_nat:
+            self.schedule_nat_detection()
+
+    def schedule_nat_detection(self):
+        if self._nat_task and not self._nat_task.done():
+            return
+        loop = asyncio.get_event_loop()
+        self._nat_task = loop.create_task(self.update_local_nat(**self._nat_options))
+
+    async def update_local_nat(
+        self,
+        *,
+        stun_host: Optional[str] = None,
+        stun_port: Optional[int] = None,
+        source_ip: Optional[str] = None,
+        source_port: int = 54320,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            metadata = await detect_nat_info(
+                stun_host=stun_host,
+                stun_port=stun_port,
+                source_ip=source_ip,
+                source_port=source_port,
+            )
+        except Exception:
+            log.warning("Không thể xác định NAT cho node hiện tại")
+            return None
+
+        self.node.update_meta(meta=metadata)
+        if self.protocol:
+            self.protocol.source_node.update_meta(meta=metadata)
+        log.info("NAT metadata cập nhật: %s", metadata)
+        return metadata
 
     # ------------------------------------------------------------------
     # RPC payload handlers
