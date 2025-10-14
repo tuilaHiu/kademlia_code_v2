@@ -269,11 +269,9 @@ class KademliaExtend(KademliaProtocol):
         return {"ok": True, "meta": self._meta_payload(self.source_node)}
 
     async def call_senddata(self, node_to_ask, payload):
-        address = self._address_for_node(node_to_ask)
-        if address is None:
-            raise ValueError("Cannot resolve address for node")
-        result = await self.senddata(
-            address,
+        result = await self._send_rpc(
+            "senddata",
+            node_to_ask,
             self.source_node.id,
             payload,
             self._meta_payload(node_to_ask),
@@ -504,8 +502,9 @@ class KademliaExtend(KademliaProtocol):
             "chunk_size": chunk_size,
         }
 
-        manifest_result = await self.senddata(
-            address,
+        manifest_result = await self._send_rpc(
+            "senddata",
+            node_to_ask,
             self.source_node.id,
             manifest,
             target_payload,
@@ -541,8 +540,9 @@ class KademliaExtend(KademliaProtocol):
                     "total": total_chunks,
                     "data": chunk,
                 }
-                result = await self.senddata(
-                    address,
+                result = await self._send_rpc(
+                    "senddata",
+                    node_to_ask,
                     self.source_node.id,
                     payload,
                     target_payload,
@@ -575,8 +575,9 @@ class KademliaExtend(KademliaProtocol):
             "type": "file_complete",
             "transfer_id": transfer,
         }
-        completion_result = await self.senddata(
-            address,
+        completion_result = await self._send_rpc(
+            "senddata",
+            node_to_ask,
             self.source_node.id,
             completion,
             target_payload,

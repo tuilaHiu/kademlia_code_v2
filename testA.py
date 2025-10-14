@@ -4,11 +4,13 @@ from pathlib import Path
 
 from extended_server import ExtendedServer
 from kademlia.node import Node
+from relay_manager import RelayManager
 
 
 HOST = "127.0.0.1"
 LOCAL_PORT = 8701
 REMOTE_PORT = 8700
+RELAY_URI = None  # đặt chuỗi ws://host:port nếu muốn gắn relay
 
 
 async def bootstrap_with_retry(server, addr, retries=10, delay=1.0):
@@ -39,8 +41,16 @@ async def resolve_remote_node(protocol, address):
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="[testA] %(message)s")
-    server = ExtendedServer()
+    server = ExtendedServer(auto_detect_nat=True)
     await server.listen(LOCAL_PORT, HOST)
+    await server.update_local_nat()
+
+    relay_manager = None
+    if RELAY_URI:
+        relay_manager = RelayManager(RELAY_URI, server.node.id.hex())
+        server.attach_relay_manager(relay_manager)
+        await relay_manager.connect()
+
     logging.info("sender listening on %s:%d", HOST, LOCAL_PORT)
 
     address = (HOST, REMOTE_PORT)
@@ -67,6 +77,8 @@ async def main():
     logging.info("call_sendfile result: %s", file_result)
 
     await asyncio.sleep(0.5)
+    if relay_manager:
+        await relay_manager.disconnect()
     server.stop()
 
 

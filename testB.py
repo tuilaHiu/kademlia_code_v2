@@ -2,12 +2,15 @@ import asyncio
 import logging
 from pathlib import Path
 
+from relay_manager import RelayManager
+
 from extended_server import ExtendedServer
 
 
 PORT = 8700
 HOST = "0.0.0.0"
 RECEIVE_DIR = Path("received_files")
+RELAY_URI = None  # đặt URI relay nếu muốn ép dùng relay, mặc định None
 
 
 class ReceiverServer(ExtendedServer):
@@ -67,8 +70,17 @@ class ReceiverServer(ExtendedServer):
 
 async def main():
     logging.basicConfig(level=logging.INFO, format="[testB] %(message)s")
-    server = ReceiverServer()
+    server = ReceiverServer(auto_detect_nat=True)
     await server.listen(PORT, HOST)
+    await server.update_local_nat()
+
+    if RELAY_URI:
+        manager = RelayManager(RELAY_URI, server.node.id.hex())
+        server.attach_relay_manager(manager)
+        await manager.connect()
+    else:
+        manager = None
+
     print(f"Receiver ready on {HOST}:{PORT}; press Ctrl+C to stop.")
     try:
         while True:
@@ -77,6 +89,9 @@ async def main():
         raise
     except KeyboardInterrupt:
         pass
+    finally:
+        if manager:
+            await manager.disconnect()
     finally:
         server.stop()
 
