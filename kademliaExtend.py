@@ -1,16 +1,28 @@
 import asyncio
 import logging
 import math
+import os
 import uuid
+from base64 import b64encode
+from hashlib import sha1
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Tuple
+
+import umsgpack
 
 from kademlia.protocol import KademliaProtocol
+from kademlia.network import Server
 from kademlia.node import Node
+from rpcudp.exceptions import MalformedMessage
+
+from relay_manager import RelayManager
 
 log = logging.getLogger(__name__)
 
 
+# ---------------------------
+# Enable Node.meta at runtime
+# ---------------------------
 def _ensure_node_meta_support():
     if getattr(Node, "_meta_support_enabled", False):
         return
@@ -40,8 +52,121 @@ def _ensure_node_meta_support():
 _ensure_node_meta_support()
 
 
-class KademliaExtend(KademliaProtocol):
-    """Extended protocol with helper RPCs to push arbitrary payloads."""
+class RelayAwareMixin:
+    """
+    Mixin cho phép chuyển hướng RPC qua RELAY theo hướng FORWARD NGUYÊN DATAGRAM UDP.
+
+    Cơ chế:
+    - Chặn __getattr__ để bọc RPC closure gốc.
+    - Nếu phát hiện hint dùng relay → tự gói datagram y hệt RPCProtocol:
+        txdata = b"\\x00" + msg_id + umsgpack.packb([name, args])
+      rồi gửi nguyên txdata qua relay_manager.forward_udp_rpc(...).
+    - Nếu relay trả lời None / thất bại → fallback: gọi closure gốc (UDP).
+    - Nếu không có hint relay → chạy UDP như bình thường.
+
+    YÊU CẦU relay_manager:
+        await relay_manager.forward_udp_rpc(
+            node: Node,                   # node đích (có ip/port/meta)
+            datagram: bytes,              # datagram UDP đã pack sẵn
+            timeout: float,               # timeout giây
+        ) -> Tuple[bool, Any]            # (ok, data) tương tự RPC gốc
+    """
+
+    _RELAY_HINT_KEY = "__relay_hint__"
+
+    # -------- Helper packing giống hệt RPCProtocol --------
+    @staticmethod
+    def _pack_rpc_udp_call(name: str, args: tuple) -> Tuple[bytes, bytes]:
+        """
+        Trả về (msg_id, txdata) theo đúng format UDP của RPCProtocol:
+            txdata = b"\\x00" + msg_id + umsgpack.packb([name, args])
+        """
+        msg_id = sha1(os.urandom(32)).digest()
+        data = umsgpack.packb([name, args])
+        if len(data) > 8192:
+            raise MalformedMessage(
+                "Total length of function name and arguments cannot exceed 8K"
+            )
+        txdata = b"\x00" + msg_id + data
+        return msg_id, txdata
+
+    async def _forward_via_relay_raw(self, name: str, node: Node, args: tuple, timeout: float):
+        """
+        Gửi NGUYÊN DATAGRAM UDP qua relay_manager với timeout.
+        Trả về (ok, data) như RPC gốc.
+        """
+        manager = getattr(self, "_relay_manager", None)
+        if manager is None:
+            return None
+
+        # Đóng gói y hệt RPCProtocol trước khi chuyển cho relay
+        msg_id, txdata = self._pack_rpc_udp_call(name, args)
+        log.debug(
+            "[RELAY] forward udp rpc '%s' to %s (msgid %s) via relay",
+            name,
+            node,
+            b64encode(msg_id),
+        )
+        try:
+            if hasattr(manager, "ensure_connected"):
+                await manager.ensure_connected()
+            return await manager.forward_udp_rpc(node, txdata, timeout=timeout)
+        except Exception:
+            log.exception(
+                "relay manager chuyển tiếp %s thất bại, sẽ fallback UDP trực tiếp cho %s",
+                name,
+                node,
+            )
+            return None
+
+    def __getattr__(self, name):
+        """
+        Bọc RPC call:
+        - Nếu không có relay hint → gọi RPC closure gốc (UDP).
+        - Nếu có relay hint → forward nguyên datagram UDP qua relay_manager.
+        - Relay fail → fallback gọi UDP.
+        """
+        attr = super().__getattr__(name)
+        if not callable(attr):
+            return attr
+
+        def wrapper(address, *args):
+            # Tách hint relay nếu có
+            hint = None
+            base_args = args
+            if args and isinstance(args[-1], dict) and self._RELAY_HINT_KEY in args[-1]:
+                hint = args[-1][self._RELAY_HINT_KEY]
+                base_args = args[:-1]
+
+            # Không có hint → chạy UDP gốc
+            if not hint or not hint.get("use_relay"):
+                return attr(address, *base_args)
+
+            # Có hint → cố gắng forward datagram qua relay
+            node = hint.get("node")
+            if node is None:
+                # Thiếu node để forward → quay về UDP
+                return attr(address, *base_args)
+
+            # Tính timeout dựa trên _wait_timeout của RPCProtocol nếu có
+            timeout = getattr(self, "_wait_timeout", 5.0)
+
+            async def relay_or_udp():
+                relay_result = await self._forward_via_relay_raw(
+                    name=name, node=node, args=base_args, timeout=timeout
+                )
+                if relay_result is not None:
+                    return relay_result
+                # Fallback: UDP gốc
+                return await attr(address, *base_args)
+
+            return asyncio.ensure_future(relay_or_udp())
+
+        return wrapper
+
+
+class KademliaExtend(RelayAwareMixin, KademliaProtocol):
+    """Extended protocol with helper RPCs; RELAY = forward nguyên datagram UDP nếu node NAT."""
 
     def __init__(self, source_node, storage, ksize):
         super().__init__(source_node, storage, ksize)
@@ -54,11 +179,15 @@ class KademliaExtend(KademliaProtocol):
         self._server = server
 
     def attach_relay_manager(self, manager) -> None:
-        """Optional helper để tích hợp với lớp quản lý relay bên ngoài."""
+        """
+        Gắn relay manager từ bên ngoài. Manager phải cung cấp API:
+            await forward_udp_rpc(node, datagram: bytes, timeout: float) -> (ok, data)
+        """
         self._relay_manager = manager
-        if self._relay_manager:
+        if self._relay_manager and hasattr(self._relay_manager, "attach_protocol"):
             self._relay_manager.attach_protocol(self)
 
+    # ---------- Meta helpers ----------
     def _update_local_meta(self, meta):
         if isinstance(meta, dict) and meta:
             self.source_node.update_meta(meta=meta)
@@ -98,6 +227,7 @@ class KademliaExtend(KademliaProtocol):
             and result[1].get("ok", False)
         )
 
+    # ---------- RPC overrides with meta ----------
     def rpc_ping(self, sender, nodeid, target_meta=None, source_meta=None):
         self._update_local_meta(target_meta)
         source = Node(
@@ -112,26 +242,22 @@ class KademliaExtend(KademliaProtocol):
             "meta": self._meta_payload(self.source_node),
         }
 
-    async def _send_via_relay(self, method: str, node, args: Iterable[Any]):
-        if not self._relay_manager:
-            log.debug("relay manager chưa được gắn, fallback sang UDP cho %s", node)
-            return None
-        try:
-            return await self._relay_manager.send_rpc(method, node, args)
-        except Exception:
-            log.exception("relay manager gửi %s thất bại, fallback sang UDP cho %s", method, node)
-            return None
-
     async def _send_rpc(self, method, node, *args):
+        """
+        Gọi RPC theo cơ chế:
+        - Nếu node nên dùng relay → chèn relay hint để __getattr__ ở mixin forward datagram.
+        - Nếu không → gọi trực tiếp UDP như mặc định.
+        """
         address = self._address_for_node(node)
         if address is None:
             raise ValueError("Cannot resolve address for node")
+
+        call_args = list(args)
         if self._should_use_relay(node):
-            relay_result = await self._send_via_relay(method, node, args)
-            if relay_result is not None:
-                return relay_result
+            call_args.append({self._RELAY_HINT_KEY: {"use_relay": True, "node": node}})
+
         rpc = getattr(self, method)
-        return await rpc(address, *args)
+        return await rpc(address, *call_args)
 
     async def call_ping(self, node_to_ask):
         target_meta = self._meta_payload(node_to_ask)
@@ -167,9 +293,9 @@ class KademliaExtend(KademliaProtocol):
         return {"ok": True, "meta": self._meta_payload(self.source_node)}
 
     async def call_store(self, node_to_ask, key, value):
-        address = self._address_for_node(node_to_ask)
-        result = await self.store(
-            address,
+        result = await self._send_rpc(
+            "store",
+            node_to_ask,
             self.source_node.id,
             key,
             value,
@@ -194,21 +320,50 @@ class KademliaExtend(KademliaProtocol):
         )
         self.welcome_if_new(source)
         node = Node(key)
-        neighbors = self.router.find_neighbors(node, exclude=source)
-        return list(map(tuple, neighbors))
+        neighbors_payload = []
+        for neighbor in self.router.find_neighbors(node, exclude=source):
+            entry = {
+                "node_id": neighbor.id,
+                "address": tuple(neighbor),
+            }
+            meta = getattr(neighbor, "meta", None)
+            if isinstance(meta, dict) and meta:
+                entry["meta"] = dict(meta)
+            neighbors_payload.append(entry)
+        return {"nodes": neighbors_payload, "meta": self._meta_payload(self.source_node)}
 
     async def call_find_node(self, node_to_ask, node_to_find):
-        address = self._address_for_node(node_to_ask)
-        result = await self.find_node(
-            address,
+        result = await self._send_rpc(
+            "find_node",
+            node_to_ask,
             self.source_node.id,
             node_to_find.id,
             self._meta_payload(node_to_ask),
             self._meta_payload(self.source_node),
         )
-        if result[0] and isinstance(result[1], dict) and "meta" in result[1]:
-            if hasattr(node_to_ask, "update_meta"):
-                node_to_ask.update_meta(meta=result[1]["meta"])
+        if result[0] and isinstance(result[1], dict):
+            payload = result[1]
+            meta = payload.get("meta")
+            if meta and hasattr(node_to_ask, "update_meta"):
+                node_to_ask.update_meta(meta=meta)
+            neighbors_payload = payload.get("nodes")
+            if neighbors_payload is not None:
+                normalized_neighbors = []
+                if isinstance(neighbors_payload, list):
+                    for entry in neighbors_payload:
+                        if isinstance(entry, dict):
+                            address = entry.get("address")
+                            if isinstance(address, (list, tuple)) and len(address) >= 3:
+                                normalized_neighbors.append(tuple(address))
+                            elif "node_id" in entry:
+                                normalized_neighbors.append(
+                                    (entry["node_id"], entry.get("ip"), entry.get("port"))
+                                )
+                        else:
+                            normalized_neighbors.append(entry)
+                else:
+                    normalized_neighbors = neighbors_payload
+                result = (result[0], normalized_neighbors)
         return self.handle_call_response(result, node_to_ask)
 
     def rpc_find_value(self, sender, nodeid, key, target_meta=None, source_meta=None):
@@ -222,13 +377,18 @@ class KademliaExtend(KademliaProtocol):
         self.welcome_if_new(source)
         value = self.storage.get(key, None)
         if value is None:
-            return self.rpc_find_node(sender, nodeid, key)
+            result = self.rpc_find_node(
+                sender, nodeid, key, target_meta=target_meta, source_meta=source_meta
+            )
+            if isinstance(result, dict):
+                result.setdefault("requested_key", key)
+            return result
         return {"value": value, "meta": self._meta_payload(self.source_node)}
 
     async def call_find_value(self, node_to_ask, node_to_find):
-        address = self._address_for_node(node_to_ask)
-        result = await self.find_value(
-            address,
+        result = await self._send_rpc(
+            "find_value",
+            node_to_ask,
             self.source_node.id,
             node_to_find.id,
             self._meta_payload(node_to_ask),
@@ -238,8 +398,28 @@ class KademliaExtend(KademliaProtocol):
             payload = result[1]
             if hasattr(node_to_ask, "update_meta"):
                 node_to_ask.update_meta(meta=payload.get("meta"))
+            if "nodes" in payload:
+                neighbors_payload = payload.get("nodes") or []
+                normalized = []
+                if isinstance(neighbors_payload, list):
+                    for entry in neighbors_payload:
+                        if isinstance(entry, dict):
+                            address = entry.get("address")
+                            if isinstance(address, (list, tuple)) and len(address) >= 3:
+                                normalized.append(tuple(address))
+                            elif "node_id" in entry:
+                                normalized.append(
+                                    (entry["node_id"], entry.get("ip"), entry.get("port"))
+                                )
+                        else:
+                            normalized.append(entry)
+                else:
+                    normalized = neighbors_payload
+                payload = {"nodes": normalized, "meta": payload.get("meta")}
+                result = (result[0], payload)
         return self.handle_call_response(result, node_to_ask)
 
+    # ---------- Arbitrary payload push ----------
     def rpc_senddata(
         self,
         sender,
@@ -262,7 +442,7 @@ class KademliaExtend(KademliaProtocol):
                 result = handler(source, payload)
                 if asyncio.iscoroutine(result):
                     asyncio.ensure_future(result)
-            except Exception:  # pragma: no cover - defensive
+            except Exception:  # defensive
                 log.exception("error while handling payload from %s", sender)
         else:
             log.debug("received payload from %s: %r", sender, payload)
@@ -284,6 +464,56 @@ class KademliaExtend(KademliaProtocol):
             result = (result[0], response.get("ok", True))
         return self.handle_call_response(result, node_to_ask)
 
+    async def _accept_request(self, msg_id, data, address):
+        """
+        Ghi đè RPCProtocol._accept_request để hỗ trợ gửi phản hồi qua relay nếu cần.
+        """
+        if not isinstance(data, list) or len(data) != 2:
+            raise MalformedMessage(f"Could not read packet: {data}")
+        funcname, args = data
+        func = getattr(self, f"rpc_{funcname}", None)
+        if func is None or not callable(func):
+            log.warning(
+                "%s has no callable method rpc_%s; ignoring request",
+                self.__class__.__name__,
+                funcname,
+            )
+            return
+
+        try:
+            if asyncio.iscoroutinefunction(func):
+                response = await func(address, *args)
+            else:
+                response = func(address, *args)
+                if asyncio.iscoroutine(response):
+                    response = await response
+        except Exception:
+            log.exception("Error while handling rpc_%s from %s", funcname, address)
+            response = {"ok": False, "error": "internal_error"}
+
+        log.debug(
+            "sending response %s for msg id %s to %s",
+            response,
+            b64encode(msg_id),
+            address,
+        )
+        txdata = b"\x01" + msg_id + umsgpack.packb(response)
+
+        sent_via_relay = False
+        if self._relay_manager:
+            try:
+                sent_via_relay = await self._relay_manager.send_udp_response(msg_id, txdata)
+            except Exception:
+                log.exception("Failed sending rpc_%s response via relay", funcname)
+                sent_via_relay = False
+
+        if not sent_via_relay:
+            if not self.transport:
+                log.warning("Missing transport to send response for rpc_%s", funcname)
+                return
+            self.transport.sendto(txdata, address)
+
+    # ---------- File transfer via senddata ----------
     async def rpc_sendfile(
         self,
         sender,
@@ -305,7 +535,7 @@ class KademliaExtend(KademliaProtocol):
 
         try:
             path = Path(file_path).expanduser().resolve()
-        except Exception as exc:  # pragma: no cover - invalid input
+        except Exception as exc:
             log.warning("rpc_sendfile invalid path from %s: %s", sender, exc)
             return {
                 "ok": False,
@@ -325,11 +555,13 @@ class KademliaExtend(KademliaProtocol):
             log.debug("rpc_sendfile chunk_size <= 0, defaulting to 4096")
             chunk_size = 4096
 
-        # keep chunks small so packed RPC payload stays within ~8K limit
+        # Giữ payload nhỏ để không vượt ~8K khi pack RPC
         max_chunk = 4096
         if chunk_size > max_chunk:
             log.debug(
-                "rpc_sendfile reducing chunk_size from %d to %d bytes", chunk_size, max_chunk
+                "rpc_sendfile reducing chunk_size from %d to %d bytes",
+                chunk_size,
+                max_chunk,
             )
             chunk_size = max_chunk
 
@@ -622,3 +854,149 @@ class KademliaExtend(KademliaProtocol):
             },
         )
         return self.handle_call_response(result, node_to_ask)
+
+
+class ExtendedServer(Server):
+    """
+    Server mở rộng cho phép lắng nghe UDP mặc định của Kademlia đồng thời
+    kết nối tới các relay endpoint (WebSocket) để forward gói tin cho node sau NAT.
+    """
+
+    protocol_class = KademliaExtend
+
+    def __init__(
+        self,
+        *args,
+        relay_endpoints: Optional[Iterable[str]] = None,
+        relay_node_id: Optional[str] = None,
+        relay_autoconnect: bool = True,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self.relay_autoconnect = relay_autoconnect
+        self.relay_endpoints = self._normalize_relay_endpoints(relay_endpoints)
+        self.relay_node_id = relay_node_id or self.node.id.hex()
+        self.relay_manager: Optional[RelayManager] = None
+        self._relay_lock: Optional[asyncio.Lock] = None
+        self._active_relay_uri: Optional[str] = None
+
+    @staticmethod
+    def _normalize_relay_endpoints(
+        endpoints: Optional[Iterable[str]],
+    ) -> list[str]:
+        if not endpoints:
+            return []
+        if isinstance(endpoints, str):
+            endpoints_iter = [endpoints]
+        else:
+            endpoints_iter = list(endpoints)
+        normalized = []
+        for endpoint in endpoints_iter:
+            if isinstance(endpoint, str):
+                trimmed = endpoint.strip()
+                if trimmed and trimmed not in normalized:
+                    normalized.append(trimmed)
+        return normalized
+
+    def _create_protocol(self):
+        proto = self.protocol_class(self.node, self.storage, self.ksize)
+        if isinstance(proto, KademliaExtend):
+            proto.attach_server(self)
+            if self.relay_manager:
+                proto.attach_relay_manager(self.relay_manager)
+        return proto
+
+    async def listen(self, port, interface="0.0.0.0"):
+        await super().listen(port, interface)
+        if isinstance(self.protocol, KademliaExtend):
+            self.protocol.attach_server(self)
+            if self.relay_manager:
+                self.protocol.attach_relay_manager(self.relay_manager)
+        if self.relay_autoconnect and self.relay_endpoints:
+            await self.connect_relay()
+
+    def _ensure_relay_lock(self) -> asyncio.Lock:
+        if self._relay_lock is None:
+            self._relay_lock = asyncio.Lock()
+        return self._relay_lock
+
+    async def connect_relay(self) -> Optional[RelayManager]:
+        """
+        Thử kết nối tới một trong các relay endpoint theo thứ tự ưu tiên.
+        Thành công → trả về RelayManager, thất bại → None.
+        """
+        async with self._ensure_relay_lock():
+            # Nếu đã kết nối và còn sống → dùng lại.
+            if self.relay_manager and getattr(self.relay_manager, "is_connected", lambda: False)():
+                return self.relay_manager
+
+            last_error = None
+            for uri in self.relay_endpoints:
+                manager = RelayManager(self.relay_node_id, uri)
+                if isinstance(self.protocol, KademliaExtend):
+                    manager.attach_protocol(self.protocol)
+                try:
+                    await manager.connect()
+                except Exception as exc:
+                    log.warning("Failed to connect relay endpoint %s: %s", uri, exc)
+                    last_error = exc
+                    continue
+
+                self.relay_manager = manager
+                self._active_relay_uri = uri
+                if isinstance(self.protocol, KademliaExtend):
+                    self.protocol.attach_relay_manager(manager)
+                    self.protocol._update_local_meta(
+                        {
+                            "use_relay": True,
+                            "relay_uri": uri,
+                            "node_id": self.relay_node_id,
+                        }
+                    )
+                if hasattr(self.node, "update_meta"):
+                    self.node.update_meta(
+                        meta={
+                            "use_relay": True,
+                            "relay_uri": uri,
+                            "node_id": self.relay_node_id,
+                        }
+                    )
+                log.info(
+                    "ExtendedServer connected to relay %s as %s",
+                    uri,
+                    self.relay_node_id,
+                )
+                return manager
+
+            if last_error:
+                log.error(
+                    "Unable to connect to any relay endpoints %s: %s",
+                    self.relay_endpoints,
+                    last_error,
+                )
+            else:
+                log.error(
+                    "Unable to connect to any relay endpoints %s (no attempt made)",
+                    self.relay_endpoints,
+                )
+            return None
+
+    async def disconnect_relay(self):
+        async with self._ensure_relay_lock():
+            manager = self.relay_manager
+            self.relay_manager = None
+            self._active_relay_uri = None
+            if isinstance(self.protocol, KademliaExtend):
+                self.protocol.attach_relay_manager(None)
+                self.protocol._update_local_meta({"use_relay": False})
+            if hasattr(self.node, "update_meta"):
+                self.node.update_meta(meta={"use_relay": False})
+            if manager and getattr(manager, "ws", None):
+                try:
+                    await manager.ws.close()
+                except Exception:
+                    pass
+
+    @property
+    def active_relay_uri(self) -> Optional[str]:
+        return self._active_relay_uri

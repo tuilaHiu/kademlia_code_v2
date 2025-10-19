@@ -1,202 +1,181 @@
-import asyncio
-import contextlib
-import json
-import logging
-import uuid
-from typing import Any, Dict, Iterable, Optional
-
-import websockets
+import asyncio, json, base64, uuid, logging, websockets, umsgpack
+from websockets.protocol import State as WebSocketState
 
 log = logging.getLogger(__name__)
 
 
-def _encode_value(value: Any) -> Any:
-    if isinstance(value, bytes):
-        return {"__type": "bytes", "data": value.hex()}
-    if isinstance(value, tuple):
-        return {"__type": "tuple", "data": [_encode_value(v) for v in value]}
-    if isinstance(value, list):
-        return [_encode_value(v) for v in value]
-    if isinstance(value, dict):
-        return {str(k): _encode_value(v) for k, v in value.items()}
-    return value
-
-
-def _decode_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        vtype = value.get("__type")
-        if vtype == "bytes":
-            return bytes.fromhex(value["data"])
-        if vtype == "tuple":
-            return tuple(_decode_value(item) for item in value["data"])
-        # regular dict: decode nested values
-        return {k: _decode_value(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_decode_value(v) for v in value]
-    return value
-
-
 class RelayManager:
-    """Đơn giản hóa việc gửi RPC qua WebSocket relay."""
+    """
+    Quản lý kết nối WebSocket tới relay trung gian để forward/nhận datagram UDP.
 
-    def __init__(self, uri: str, node_id_hex: str):
-        self._uri = uri
-        self._node_id_hex = node_id_hex
-        self._protocol = None
-        self._ws: Optional[websockets.WebSocketClientProtocol] = None
-        self._listener: Optional[asyncio.Task] = None
-        self._pending: Dict[str, asyncio.Future] = {}
-        self._lock = asyncio.Lock()
-        self._connected_event = asyncio.Event()
+    - forward_udp_rpc: gửi nguyên datagram UDP tới node đích qua relay.
+    - send_udp_response: gửi lại datagram phản hồi cho node đã gửi yêu cầu qua relay.
+    - attach_protocol: cho phép relay đẩy trực tiếp datagram vào protocol Kademlia.
+    """
 
-    def attach_protocol(self, protocol) -> None:
-        self._protocol = protocol
+    def __init__(self, node_id: str, relay_uri: str):
+        self.node_id = node_id
+        self.uri = relay_uri
+        self.pending = {}
+        self.incoming = {}
+        self.ws = None
+        self.protocol = None
+        self._listen_task = None
 
-    async def connect(self) -> None:
-        async with self._lock:
-            if self._ws and not self._ws.close:
-                return
-            log.info("RelayManager connecting to %s", self._uri)
-            self._ws = await websockets.connect(self._uri)
-            await self._ws.send(
-                json.dumps({"type": "register", "node_id": self._node_id_hex})
-            )
-            self._connected_event.set()
-            if self._listener is None or self._listener.done():
-                self._listener = asyncio.create_task(self._listen_loop())
+    def attach_protocol(self, proto):
+        self.protocol = proto
 
-    async def disconnect(self) -> None:
-        async with self._lock:
-            if self._ws and not self._ws.close:
-                await self._ws.close()
-            self._connected_event.clear()
-        if self._listener:
-            self._listener.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._listener
-            self._listener = None
-
-    async def ensure_connected(self) -> None:
-        if self._ws and not self._ws.close:
+    async def connect(self):
+        if self.ws:
             return
-        await self.connect()
+        self.ws = await websockets.connect(self.uri)
+        await self.ws.send(json.dumps({"node_id": self.node_id}))
+        self._listen_task = asyncio.create_task(self._listen())
+        log.info(f"[RelayManager] Connected as {self.node_id}")
 
-    async def _listen_loop(self) -> None:
-        assert self._ws is not None
+    async def _listen(self):
         try:
-            async for message in self._ws:
-                await self._handle_message(message)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("RelayManager listen loop terminated unexpectedly")
-        finally:
-            self._connected_event.clear()
-            # fail pending futures
-            while self._pending:
-                _, future = self._pending.popitem()
-                if not future.done():
-                    future.set_result((False, {"error": "relay disconnected"}))
+            async for message in self.ws:
+                data = json.loads(message)
+                src = data.get("source")
+                rpc_id = data.get("rpc_id")
+                payload_b64 = data.get("payload_b64")
 
-    async def _handle_message(self, message: str) -> None:
-        try:
-            payload = json.loads(message)
-        except json.JSONDecodeError:
-            log.warning("RelayManager received invalid JSON: %s", message)
-            return
-        mtype = payload.get("type")
-        if mtype == "rpc_response":
-            await self._handle_response(payload)
-        elif mtype == "rpc_request":
-            await self._handle_request(payload)
-        else:
-            log.debug("RelayManager ignoring message type %s", mtype)
+                if data.get("rpc") == "udp_forward" and payload_b64:
+                    raw = base64.b64decode(payload_b64)
+                    msg_id = raw[1:21]
+                    if rpc_id:
+                        self.incoming[msg_id] = {"rpc_id": rpc_id, "source": src}
+                    log.debug(
+                        "[%s] received UDP datagram from %s via relay (len=%d)",
+                        self.node_id,
+                        src,
+                        len(raw),
+                    )
 
-    async def _handle_response(self, payload: Dict[str, Any]) -> None:
-        msg_id = payload.get("id")
-        future = self._pending.pop(msg_id, None)
-        if not future:
-            log.debug("RelayManager unknown response id %s", msg_id)
-            return
-        ok = bool(payload.get("ok"))
-        result = _decode_value(payload.get("result"))
-        if not future.done():
-            future.set_result((ok, result))
+                    # forward vào RPCProtocol xử lý
+                    if self.protocol and hasattr(self.protocol, "datagram_received"):
+                        self.protocol.datagram_received(raw, (src, 0))  # (0) = dummy port
+                    else:
+                        log.warning(
+                            "[RelayManager] Protocol not attached or missing datagram_received"
+                        )
 
-    async def _handle_request(self, payload: Dict[str, Any]) -> None:
-        if not self._protocol:
-            log.debug("RelayManager has no protocol attached; dropping request")
-            return
-        rpc_name = payload.get("rpc")
-        request_id = payload.get("id")
-        sender_hex = payload.get("from")
-        args = _decode_value(payload.get("args", []))
-        handler = getattr(self._protocol, f"rpc_{rpc_name}", None)
-        ok = False
-        result: Any = {"error": "unknown rpc"}
-        if handler is not None:
-            address = ("relay", 0)
-            try:
-                maybe_coro = handler(address, *args)
-                if asyncio.iscoroutine(maybe_coro):
-                    result = await maybe_coro
+                elif data.get("rpc") == "udp_response" and payload_b64:
+                    fut = self.pending.pop(rpc_id, None)
+                    if fut and not fut.done():
+                        fut.set_result(base64.b64decode(payload_b64))
                 else:
-                    result = maybe_coro
-                ok = True
+                    log.debug(
+                        "[RelayManager] Ignoring unsupported relay message: %s",
+                        data.get("rpc"),
+                    )
+        except websockets.ConnectionClosed:
+            log.warning("[RelayManager] Relay connection closed")
+        except Exception as exc:
+            log.exception("[RelayManager] Error while listening relay: %s", exc)
+        finally:
+            self._cleanup_after_disconnect()
+
+    def _cleanup_after_disconnect(self):
+        if self.ws:
+            try:
+                asyncio.create_task(self.ws.close())
             except Exception:
-                log.exception("RelayManager error in rpc_%s", rpc_name)
-                ok = False
-                result = {"error": "exception"}
-        response = {
-            "type": "rpc_response",
-            "id": request_id,
-            "rpc": rpc_name,
-            "from": self._node_id_hex,
-            "to": sender_hex,
-            "ok": ok,
-            "result": _encode_value(result),
-        }
-        await self._send_json(response)
+                pass
+        self.ws = None
+        task = self._listen_task
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
+        self._listen_task = None
+        # fail all pending futures
+        for rpc_id, fut in list(self.pending.items()):
+            if not fut.done():
+                fut.set_result(None)
+            self.pending.pop(rpc_id, None)
+        self.incoming.clear()
 
-    async def _send_json(self, payload: Dict[str, Any]) -> bool:
-        try:
-            await self.ensure_connected()
-        except Exception:
-            log.exception("RelayManager failed to connect before sending")
+    def is_connected(self) -> bool:
+        ws = self.ws
+        if ws is None:
             return False
-        if not self._ws or self._ws.close:
-            return False
-        try:
-            await self._ws.send(json.dumps(payload))
-            return True
-        except Exception:
-            log.exception("RelayManager failed to send payload")
+        state = getattr(ws, "state", None)
+        if state is not None:
+            return state is WebSocketState.OPEN
+        closed = getattr(ws, "closed", None)
+        if isinstance(closed, bool):
+            return not closed
+        if callable(closed):
+            try:
+                return not closed()
+            except TypeError:
+                pass
+        open_attr = getattr(ws, "open", None)
+        if isinstance(open_attr, bool):
+            return open_attr
+        if callable(open_attr):
+            try:
+                return bool(open_attr())
+            except TypeError:
+                pass
+        return True
+
+    async def ensure_connected(self):
+        if not self.is_connected():
+            await self.connect()
+
+    async def send_udp_response(self, msg_id: bytes, txdata: bytes) -> bool:
+        """
+        Gửi datagram phản hồi tương ứng với msg_id tới node nguồn qua relay.
+        """
+        if not self.is_connected():
+            raise RuntimeError("RelayManager not connected")
+
+        info = self.incoming.get(msg_id)
+        if not info:
+            log.debug(
+                "[RelayManager] No relay record for msg_id=%s; fallback UDP",
+                base64.b64encode(msg_id).decode(),
+            )
             return False
 
-    async def send_rpc(self, method: str, node, args: Iterable[Any]):
-        """Gửi một RPC tới node qua relay."""
-        await self.ensure_connected()
-        if not self._ws or self._ws.close:
-            return None
-        msg_id = uuid.uuid4().hex
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-        self._pending[msg_id] = future
-        payload = {
-            "type": "rpc_request",
-            "id": msg_id,
-            "rpc": method,
-            "from": self._node_id_hex,
-            "to": getattr(node, "id", None).hex() if getattr(node, "id", None) else None,
-            "args": _encode_value(list(args)),
+        msg = {
+            "target": info.get("source"),
+            "rpc": "udp_response",
+            "rpc_id": info.get("rpc_id"),
+            "payload_b64": base64.b64encode(txdata).decode(),
         }
-        if payload["to"] is None:
-            future.cancel()
-            self._pending.pop(msg_id, None)
-            raise ValueError("Target node is missing id for relay RPC")
-        sent = await self._send_json(payload)
-        if not sent:
-            self._pending.pop(msg_id, None)
-            future.cancel()
+        await self.ws.send(json.dumps(msg))
+        # chỉ pop sau khi send thành công
+        self.incoming.pop(msg_id, None)
+        return True
+
+    async def forward_udp_rpc(self, node, txdata: bytes, timeout: float = 5.0):
+        """
+        Forward nguyên datagram (txdata) đến node qua relay websocket.
+        """
+        if not self.ws:
+            raise RuntimeError("RelayManager not connected")
+
+        rpc_id = str(uuid.uuid4())
+        fut = asyncio.get_event_loop().create_future()
+        self.pending[rpc_id] = fut
+
+        msg = {
+            "target": node.meta.get("node_id", node.id.hex()[:8]),
+            "rpc": "udp_forward",
+            "rpc_id": rpc_id,
+            "payload_b64": base64.b64encode(txdata).decode(),
+        }
+
+        await self.ws.send(json.dumps(msg))
+        try:
+            data = await asyncio.wait_for(fut, timeout=timeout)
+            if data is None:
+                raise asyncio.TimeoutError()
+            # data là datagram raw (binary), bạn có thể decode msgpack để kiểm tra
+            ok, unpacked = True, umsgpack.unpackb(data)
+            return (ok, unpacked)
+        except asyncio.TimeoutError:
+            log.warning(f"[RelayManager] Timeout relay {rpc_id}")
             return None
-        return await future
