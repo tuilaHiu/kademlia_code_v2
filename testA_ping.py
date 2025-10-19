@@ -53,7 +53,7 @@ async def main():
     )
 
     try:
-        logging.info("Sending ping to node B via relay...")
+        logging.info("Sending ping to node B...")
         result = await server.protocol.call_ping(node_b)
         logging.info("Ping result: %s", result)
     finally:

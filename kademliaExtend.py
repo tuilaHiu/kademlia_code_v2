@@ -207,9 +207,18 @@ class KademliaExtend(RelayAwareMixin, KademliaProtocol):
         return (ip, port)
 
     @staticmethod
-    def _should_use_relay(node) -> bool:
+    def _prefers_relay(node) -> bool:
         meta = getattr(node, "meta", None) or {}
-        return bool(meta.get("use_relay") or meta.get("is_nat") or meta.get("force_relay"))
+        return bool(meta.get("use_relay") or meta.get("is_nat"))
+
+    @staticmethod
+    def _force_relay(node) -> bool:
+        meta = getattr(node, "meta", None) or {}
+        return bool(meta.get("force_relay"))
+
+    @staticmethod
+    def _rpc_result_ok(result) -> bool:
+        return isinstance(result, tuple) and len(result) >= 1 and bool(result[0])
 
     @staticmethod
     def _meta_payload(node):
@@ -252,12 +261,47 @@ class KademliaExtend(RelayAwareMixin, KademliaProtocol):
         if address is None:
             raise ValueError("Cannot resolve address for node")
 
-        call_args = list(args)
-        if self._should_use_relay(node):
-            call_args.append({self._RELAY_HINT_KEY: {"use_relay": True, "node": node}})
-
         rpc = getattr(self, method)
-        return await rpc(address, *call_args)
+        prefers_relay = self._prefers_relay(node)
+        force_relay = self._force_relay(node)
+
+        async def call_via_relay():
+            relay_args = list(args)
+            relay_args.append(
+                {self._RELAY_HINT_KEY: {"use_relay": True, "node": node}}
+            )
+            return await rpc(address, *relay_args)
+
+        # Force relay -> skip UDP attempt
+        if force_relay:
+            return await call_via_relay()
+
+        # Try UDP first
+        udp_exception = None
+        try:
+            result = await rpc(address, *args)
+        except Exception as exc:  # pragma: no cover - defensive
+            udp_exception = exc
+            result = None
+        if self._rpc_result_ok(result):
+            return result
+        if not prefers_relay or self._relay_manager is None:
+            if udp_exception:
+                raise udp_exception
+            return result
+
+        # UDP failed; fall back to relay if available
+        try:
+            relay_result = await call_via_relay()
+        except Exception:
+            if udp_exception:
+                raise udp_exception
+            raise
+        if relay_result is not None:
+            return relay_result
+        if udp_exception:
+            raise udp_exception
+        return result
 
     async def call_ping(self, node_to_ask):
         target_meta = self._meta_payload(node_to_ask)
