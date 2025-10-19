@@ -173,9 +173,11 @@ class RelayManager:
             data = await asyncio.wait_for(fut, timeout=timeout)
             if data is None:
                 raise asyncio.TimeoutError()
-            # data là datagram raw (binary), bạn có thể decode msgpack để kiểm tra
-            ok, unpacked = True, umsgpack.unpackb(data)
-            return (ok, unpacked)
+            if len(data) < 22 or data[:1] != b"\x01":
+                log.warning("[RelayManager] Unexpected relay response format (len=%d)", len(data))
+                return (True, data)
+            response_payload = umsgpack.unpackb(data[21:])
+            return (True, response_payload)
         except asyncio.TimeoutError:
             log.warning(f"[RelayManager] Timeout relay {rpc_id}")
             return None
