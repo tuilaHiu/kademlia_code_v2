@@ -1,81 +1,60 @@
+# relay_server.py
+# Dưới đây là một thiết kế đầy đủ giúp bạn thực hiện RPC qua relay WebSocket, trong đó:
+# các Node  sẽ kết nối đến RelayServer qua WebSocket.
+# Khi Node A muốn gọi RPC đến Node B, nó gửi yêu cầu qua RelayServer.
+# RelayServer chuyển tiếp message cho Node B.
+# Node B xử lý RPC và gửi kết quả ngược lại qua RelayServer → Node A.
+# Chạy thử nghiệm
+# Terminal 1: python relay_server.py
+# Trminal 2: python node.py với "node_id": "nodeB"
+# Terminal 3: python node.py với "node_id": "nodeA" và thực hiện call_rpc("nodeB", ...)
+# Ưu điểm
+# RPC từ node A đến B diễn ra qua relay WebSocket mà không cần node B gọi ngược lại.
+# Relay không cần xử lý logic RPC, chỉ forward gói tin.
+# Kết quả được trả lại đầy đủ thông qua relay.
+
+# 1. Relay Server (chuyển tiếp gói tin)
+
 import asyncio
 import json
-import logging
-from typing import Dict
-
 import websockets
 
-logging.basicConfig(level=logging.INFO, format="[relay] %(message)s")
-log = logging.getLogger("relay")
-
-
-class RelayHub:
+class RelayServer:
     def __init__(self):
-        self._clients: Dict[str, websockets.WebSocketServerProtocol] = {}
-        self._lock = asyncio.Lock()
+        self.connections = {}  # node_id -> websocket
 
-    async def register(self, node_id: str, ws: websockets.WebSocketServerProtocol):
-        async with self._lock:
-            self._clients[node_id] = ws
-            log.info("Node %s connected", node_id)
+    async def handler(self, websocket):
+        node_id = None
+        try:
+            init = await websocket.recv()
+            data = json.loads(init)
+            node_id = data.get("node_id")
+            if not node_id:
+                return await websocket.close()
+            self.connections[node_id] = websocket
+            print(f"[Relay] {node_id} connected")
 
-    async def unregister(self, node_id: str):
-        async with self._lock:
-            existing = self._clients.pop(node_id, None)
-            if existing:
-                log.info("Node %s disconnected", node_id)
+            async for message in websocket:
+                data = json.loads(message)
+                target = data.get("target")
+                if target in self.connections:
+                    await self.connections[target].send(json.dumps({
+                        "source": node_id,
+                        "rpc": data["rpc"],
+                        "args": data["args"],
+                        "rpc_id": data["rpc_id"]
+                    }))
+        except:
+            pass
+        finally:
+            if node_id:
+                self.connections.pop(node_id, None)
+                print(f"[Relay] {node_id} disconnected")
 
-    async def forward(self, target_id: str, payload: str):
-        async with self._lock:
-            ws = self._clients.get(target_id)
-        if ws is None:
-            log.warning("Target %s not connected; dropping message", target_id)
-            return
-        await ws.send(payload)
-
-
-hub = RelayHub()
-
-
-async def handler(ws: websockets.WebSocketServerProtocol):
-    node_id = None
-    try:
-        greeting = await ws.recv()
-        data = json.loads(greeting)
-        if data.get("type") != "register":
-            await ws.close(code=4001, reason="expected register")
-            return
-        node_id = data.get("node_id")
-        if not node_id:
-            await ws.close(code=4002, reason="missing node_id")
-            return
-        await hub.register(node_id, ws)
-        async for message in ws:
-            try:
-                payload = json.loads(message)
-            except json.JSONDecodeError:
-                log.warning("Invalid JSON from %s", node_id)
-                continue
-            target = payload.get("to")
-            if not target:
-                log.warning("Message from %s missing target: %s", node_id, payload)
-                continue
-            await hub.forward(target, message)
-    except websockets.ConnectionClosed:
-        pass
-    finally:
-        if node_id:
-            await hub.unregister(node_id)
-
-
-async def main(host="0.0.0.0", port=8765):
-    async with websockets.serve(handler, host, port):
-        log.info("Relay server listening on %s:%d", host, port)
-        await asyncio.Future()
-
+    async def run(self):
+        print("[Relay] Running...")
+        async with websockets.serve(self.handler, "0.0.0.0", 8765):
+            await asyncio.Future()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(RelayServer().run())
