@@ -5,6 +5,7 @@ from pathlib import Path
 from kademlia.node import Node
 
 from kademliaExtend import RelayAwareServer
+from nat_utils import detect_nat_info
 from node_config import (
     BOOTSTRAP_ADDR,
     NODE_A_ADDR,
@@ -13,7 +14,11 @@ from node_config import (
     NODE_B_ADDR,
     NODE_B_ID,
     NODE_B_META,
+    RELAY_URI,
+    STUN_HOST,
+    STUN_PORT,
 )
+from relay_manager import RelayManager
 
 
 async def ping_node_b(server: RelayAwareServer):
@@ -77,11 +82,47 @@ async def send_sample_file(server: RelayAwareServer):
         logging.exception("send_file raised an exception")
 
 
+async def build_metadata(base_meta):
+    meta = dict(base_meta)
+    try:
+        nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
+        logging.info(
+            "NAT detection result: %s", {k: nat_info.get(k) for k in ("nat_type", "external_ip", "is_nat")}
+        )
+    except Exception:
+        logging.exception("Failed to detect NAT info")
+        nat_info = {}
+
+    nat_type = nat_info.get("nat_type")
+    if nat_type:
+        meta["nat"] = nat_type
+        meta["nat_type"] = nat_type
+    if nat_info.get("external_ip"):
+        meta["external_ip"] = nat_info["external_ip"]
+    if nat_info.get("local_ip"):
+        meta["local_ip"] = nat_info["local_ip"]
+
+    if nat_info.get("is_nat"):
+        meta["use_relay"] = True
+        if RELAY_URI:
+            meta["relay_uri"] = RELAY_URI
+    return meta
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    server = RelayAwareServer(node_id=NODE_A_ID)
-    server.node.meta = dict(NODE_A_META)
+    meta = await build_metadata(NODE_A_META)
+    relay_manager = None
+    if meta.get("use_relay"):
+        if not RELAY_URI:
+            logging.warning("Relay URI not configured; cannot enable relay despite NAT")
+        else:
+            relay_manager = RelayManager(meta.get("node_id", "nodeA"), RELAY_URI)
+            logging.info("Relay enabled for nodeA via %s", RELAY_URI)
+
+    server = RelayAwareServer(node_id=NODE_A_ID, relay_manager=relay_manager)
+    server.node.meta = meta
 
     host, port = NODE_A_ADDR
     await server.listen(port, interface=host)
