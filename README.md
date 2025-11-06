@@ -9,7 +9,7 @@ Hướng dẫn từng bước giúp bạn dựng thử nghiệm gồm **bootstra
 ## 1. Chuẩn bị mã nguồn & môi trường Python
 
 ```bash
-git clone <repository-url> kademlia-demo
+git clone https://github.com/tuilaHiu/kademlia_code_v2.git kademlia-demo
 cd kademlia-demo
 
 python3 -m venv venv
