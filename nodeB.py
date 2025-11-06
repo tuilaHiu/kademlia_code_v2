@@ -4,7 +4,7 @@ from pathlib import Path
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from node_config import (
+from nodeB_config import (
     BOOTSTRAP_ADDR,
     NODE_B_ADDR,
     NODE_B_ID,

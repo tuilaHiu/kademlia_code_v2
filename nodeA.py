@@ -6,7 +6,7 @@ from kademlia.node import Node
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from node_config import (
+from nodeA_config import (
     BOOTSTRAP_ADDR,
     NODE_A_ADDR,
     NODE_A_ID,
