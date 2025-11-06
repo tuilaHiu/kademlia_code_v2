@@ -360,8 +360,20 @@ class RelayAwareServer(Server):
         Lắng nghe WebSocket relay đồng thời với UDP listener.
         """
         if self.relay_manager:
-            await self.relay_manager.connect()
-            log.info("[RelayAwareServer] Relay manager connected for node %s", self.node.long_id)
+            try:
+                await self.relay_manager.connect()
+                log.info(
+                    "[RelayAwareServer] Relay manager connected for node %s",
+                    self.node.long_id,
+                )
+            except Exception:
+                log.exception(
+                    "[RelayAwareServer] Failed to connect relay manager for node %s",
+                    self.node.long_id,
+                )
+            # Nếu đã có relay manager kết nối tới server bên ngoài thì không cần
+            # mở thêm WebSocket listener cục bộ.
+            return
 
         if self._relay_listener:
             return
