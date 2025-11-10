@@ -20,6 +20,8 @@ from kademlia.protocol import KademliaProtocol
 
 from relay_manager import RelayManager
 
+MAX_RPC_PAYLOAD = int(os.getenv("KAD_RPC_MAX_PAYLOAD", "4096"))
+
 log = logging.getLogger(__name__)
 
 
@@ -513,15 +515,24 @@ class RelayAwareServer(Server):
             raise TypeError("node must be an instance of kademlia.node.Node")
         return await self.protocol.call_send_data(node, payload)
 
-    async def send_file(self, node: Node, file_path: os.PathLike, chunk_size: int = 65536):
+    async def send_file(
+        self,
+        node: Node,
+        file_path: os.PathLike,
+        chunk_size: int = 65536,
+        *,
+        max_payload: Optional[int] = None,
+    ):
         path = Path(file_path)
         if not path.is_file():
             raise FileNotFoundError(f"File not found: {path}")
-        total_chunks = max(1, math.ceil(path.stat().st_size / max(1, chunk_size)))
+        payload_cap = max_payload if isinstance(max_payload, int) and max_payload > 0 else MAX_RPC_PAYLOAD
+        safe_chunk_size = max(1, min(chunk_size, payload_cap))
+        total_chunks = max(1, math.ceil(path.stat().st_size / safe_chunk_size))
         transfer_id = str(uuid.uuid4())
         with path.open("rb") as handle:
             for index in range(total_chunks):
-                chunk = handle.read(chunk_size)
+                chunk = handle.read(safe_chunk_size)
                 if chunk is None:
                     chunk = b""
                 payload = {
