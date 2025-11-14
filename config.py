@@ -13,13 +13,13 @@ from kademlia.utils import digest
 # ============================================================================
 
 # Node addresses (can override via environment variables)
-BOOTSTRAP_HOST = os.getenv("BOOTSTRAP_HOST", "127.0.0.1")
+BOOTSTRAP_HOST = os.getenv("BOOTSTRAP_HOST", "146.190.93.139")
 BOOTSTRAP_PORT = 8468
 
 NODE_A_HOST = os.getenv("NODE_A_HOST", "0.0.0.0")
 NODE_A_PORT = 8469
 
-NODE_B_HOST = os.getenv("NODE_B_HOST", "0.0.0.0")
+NODE_B_HOST = os.getenv("NODE_B_HOST", "146.190.93.139")
 NODE_B_PORT = 8470
 
 # Addresses
@@ -39,8 +39,8 @@ NODE_B_ID = digest(b"node-b")
 # Relay & STUN Configuration
 # ============================================================================
 
-RELAY_HOST = os.getenv("RELAY_HOST", "127.0.0.1")
-RELAY_PORT = int(os.getenv("RELAY_PORT", "8765"))
+RELAY_HOST = os.getenv("RELAY_HOST", "146.190.93.139")
+RELAY_PORT = int(os.getenv("RELAY_PORT", "8760"))
 RELAY_URI = os.getenv("RELAY_URI", f"ws://{RELAY_HOST}:{RELAY_PORT}")
 
 STUN_HOST = os.getenv("STUN_HOST", "stun.l.google.com")
