@@ -12,7 +12,7 @@ import asyncio
 import logging
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from nodeA_config import (
+from config import (
     BOOTSTRAP_ADDR,
     NODE_A_ID,
     NODE_A_META,

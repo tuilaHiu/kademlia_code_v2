@@ -6,7 +6,7 @@ from kademlia.node import Node
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from nodeA_config import (
+from config import (
     BOOTSTRAP_ADDR,
     NODE_A_ADDR,
     NODE_A_ID,
@@ -21,6 +21,33 @@ from nodeA_config import (
 from relay_manager import RelayManager
 
 
+def get_node_with_metadata(server: RelayAwareServer, node_id: bytes, fallback_addr: tuple, fallback_meta: dict) -> Node:
+    """
+    Lấy node từ routing table (đã có metadata từ crawling) hoặc tạo mới với fallback.
+    """
+    # Try to find in routing table first
+    for bucket in server.protocol.router.buckets:
+        for node in bucket.get_nodes():
+            if node.id == node_id:
+                # Found in routing table - check if has metadata
+                meta = getattr(node, 'meta', None)
+                if not meta:
+                    # Try cache
+                    meta = server.protocol.node_metadata_cache.get(node.id)
+                if meta:
+                    logging.info(f"Found node {node_id.hex()[:8]} in routing table with metadata from crawling")
+                    return node
+                else:
+                    logging.warning(f"Found node {node_id.hex()[:8]} but no metadata, using fallback")
+                    break
+
+    # Not found or no metadata - create new with fallback
+    logging.info(f"Node {node_id.hex()[:8]} not in routing table, creating with fallback metadata")
+    node = Node(node_id, fallback_addr[0], fallback_addr[1])
+    node.meta = fallback_meta
+    return node
+
+
 async def ping_node_b(server: RelayAwareServer):
     """
     Gửi RPC ping từ nodeA tới nodeB để kiểm tra đường truyền.
@@ -28,8 +55,8 @@ async def ping_node_b(server: RelayAwareServer):
     logging.info("Waiting 2 seconds before sending ping to nodeB...")
     await asyncio.sleep(2)
 
-    node_b = Node(NODE_B_ID, NODE_B_ADDR[0], NODE_B_ADDR[1])
-    node_b.meta = dict(NODE_B_META)
+    # Get nodeB with metadata from routing table (crawled) or fallback
+    node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
 
     try:
         result = await server.protocol.call_ping(node_b)
@@ -48,8 +75,8 @@ async def send_sample_data(server: RelayAwareServer):
     Gửi dữ liệu JSON đơn giản tới nodeB qua send_data.
     """
     await asyncio.sleep(3)
-    node_b = Node(NODE_B_ID, NODE_B_ADDR[0], NODE_B_ADDR[1])
-    node_b.meta = dict(NODE_B_META)
+    # Get nodeB with metadata from routing table (crawled) or fallback
+    node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
     payload = {"type": "text", "message": "Hello from nodeA"}
 
     try:
@@ -69,8 +96,8 @@ async def send_sample_file(server: RelayAwareServer):
     Gửi file mẫu tới nodeB bằng cách chia thành nhiều chunk send_data.
     """
     await asyncio.sleep(4)
-    node_b = Node(NODE_B_ID, NODE_B_ADDR[0], NODE_B_ADDR[1])
-    node_b.meta = dict(NODE_B_META)
+    # Get nodeB with metadata from routing table (crawled) or fallback
+    node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
     sample_path = Path("test.png")
     if not sample_path.exists():
         logging.warning("Sample file %s not found, skipping send_file test", sample_path)
