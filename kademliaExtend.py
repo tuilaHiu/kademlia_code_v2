@@ -51,11 +51,26 @@ class RelayAwareProtocol(KademliaProtocol):
         super().__init__(source_node, storage, ksize)
         self.relay_manager = relay_manager
         self.server = None
+        # Cache metadata của nodes để persist metadata ngay cả khi Node object thay đổi
+        self.node_metadata_cache: Dict[bytes, Dict] = {}
         if self.relay_manager:
             self.relay_manager.attach_protocol(self)
 
     def attach_server(self, server: "RelayAwareServer") -> None:
         self.server = server
+
+    def welcome_if_new(self, node):
+        """
+        Override để cache metadata khi node được add vào routing table.
+        """
+        # Cache metadata nếu node có
+        node_meta = getattr(node, 'meta', None)
+        if node_meta and node.id not in self.node_metadata_cache:
+            self.node_metadata_cache[node.id] = node_meta
+            log.debug(f"[welcome_if_new] Cached metadata for node {node.id.hex()[:8]}: {node_meta}")
+
+        # Gọi parent class để thực hiện logic gốc
+        return super().welcome_if_new(node)
 
     # ------------------------------------------------------------------ #
     # Helpers around metadata and relay detection                        #
@@ -91,6 +106,8 @@ class RelayAwareProtocol(KademliaProtocol):
     def _ensure_node_meta(self, node: Node, meta: Optional[Dict]) -> Node:
         if meta is not None:
             setattr(node, "meta", meta)
+            # Also store in cache para persistence
+            self.node_metadata_cache[node.id] = meta
         return node
 
     def _deserialize_nodes(self, nodelist: list) -> list:
@@ -107,6 +124,8 @@ class RelayAwareProtocol(KademliaProtocol):
                 node = Node(item['id'], item['ip'], item['port'])
                 if 'meta' in item and item['meta']:
                     setattr(node, 'meta', item['meta'])
+                    # Also cache the metadata
+                    self.node_metadata_cache[node.id] = item['meta']
                 result.append(node)
             elif isinstance(item, (tuple, list)) and len(item) >= 3:
                 # Format cũ: tuple (id, ip, port)
@@ -265,6 +284,10 @@ class RelayAwareProtocol(KademliaProtocol):
         log.info("finding neighbors of %i in local table", int(nodeid.hex(), 16))
         source_meta = meta_source if meta_source is not None else meta_target
         source = self._ensure_node_meta(Node(nodeid, sender[0], sender[1]), source_meta)
+
+        # Debug: log source metadata
+        log.debug(f"[rpc_find_node] source={source.id.hex()[:8]}, source_meta={source_meta}")
+
         self.welcome_if_new(source)
         node = Node(key)
         neighbors = self.router.find_neighbors(node, exclude=source)
@@ -273,6 +296,14 @@ class RelayAwareProtocol(KademliaProtocol):
         result = []
         for n in neighbors:
             node_meta = getattr(n, 'meta', None)
+            # Try to get from cache nếu node không có metadata attribute
+            if not node_meta and n.id in self.node_metadata_cache:
+                node_meta = self.node_metadata_cache[n.id]
+                log.debug(f"[rpc_find_node] recovered metadata từ cache cho node {n.id.hex()[:8]}")
+
+            # Debug: log neighbor metadata
+            log.debug(f"[rpc_find_node] neighbor={n.id.hex()[:8]}, has_meta={node_meta is not None}, meta={node_meta}")
+
             if node_meta:
                 # Trả về dict chứa đầy đủ thông tin bao gồm metadata
                 result.append({
