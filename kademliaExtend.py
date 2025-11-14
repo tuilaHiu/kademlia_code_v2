@@ -93,6 +93,29 @@ class RelayAwareProtocol(KademliaProtocol):
             setattr(node, "meta", meta)
         return node
 
+    def _deserialize_nodes(self, nodelist: list) -> list:
+        """
+        Deserialize danh sách node từ format mixed (dict hoặc tuple) thành Node objects với metadata.
+        Format hỗ trợ:
+        - Dict: {'id': ..., 'ip': ..., 'port': ..., 'meta': {...}}
+        - Tuple: (id, ip, port) - backward compatible
+        """
+        result = []
+        for item in nodelist:
+            if isinstance(item, dict):
+                # Format mới với metadata
+                node = Node(item['id'], item['ip'], item['port'])
+                if 'meta' in item and item['meta']:
+                    setattr(node, 'meta', item['meta'])
+                result.append(node)
+            elif isinstance(item, (tuple, list)) and len(item) >= 3:
+                # Format cũ: tuple (id, ip, port)
+                node = Node(item[0], item[1], item[2])
+                result.append(node)
+            else:
+                log.warning("Unknown node format in response: %s", type(item))
+        return result
+
     # ------------------------------------------------------------------ #
     # Relay datagram handling                                            #
     # ------------------------------------------------------------------ #
@@ -245,7 +268,23 @@ class RelayAwareProtocol(KademliaProtocol):
         self.welcome_if_new(source)
         node = Node(key)
         neighbors = self.router.find_neighbors(node, exclude=source)
-        return list(map(tuple, neighbors))
+
+        # Serialize neighbors với metadata để propagate qua network
+        result = []
+        for n in neighbors:
+            node_meta = getattr(n, 'meta', None)
+            if node_meta:
+                # Trả về dict chứa đầy đủ thông tin bao gồm metadata
+                result.append({
+                    'id': n.id,
+                    'ip': n.ip,
+                    'port': n.port,
+                    'meta': node_meta
+                })
+            else:
+                # Backward compatible: trả về tuple cho node không có metadata
+                result.append(tuple(n))
+        return result
 
     def rpc_find_value(self, sender, nodeid, key, meta_target=None, meta_source=None):
         source_meta = meta_source if meta_source is not None else meta_target
@@ -309,6 +348,32 @@ class RelayAwareProtocol(KademliaProtocol):
             address, self.source_node.id, payload, meta_target, meta_source
         )
         return self.handle_call_response(result, node_to_ask)
+
+    def handle_call_response(self, result, node):
+        """
+        Override handle_call_response để deserialize metadata từ node list trong response.
+        Xử lý cả find_node và find_value responses.
+        """
+        if not result[0]:
+            # Không có response, xử lý như KademliaProtocol gốc
+            log.warning("no response from %s, removing from router", node)
+            self.router.remove_contact(node)
+            return result
+
+        log.info("got successful response from %s", node)
+        self.welcome_if_new(node)
+
+        # Deserialize node list nếu response chứa danh sách nodes
+        response_data = result[1]
+        if isinstance(response_data, list) and response_data:
+            # Response là node list từ find_node hoặc find_value (khi không tìm thấy value)
+            deserialized_nodes = self._deserialize_nodes(response_data)
+            return (result[0], deserialized_nodes)
+        elif isinstance(response_data, dict) and 'value' not in response_data:
+            # Edge case: dict nhưng không phải value response
+            log.debug("Response is dict but not a value response: %s", response_data)
+
+        return result
 
 
 class RelayAwareServer(Server):
