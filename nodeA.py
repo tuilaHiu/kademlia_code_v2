@@ -6,18 +6,7 @@ from kademlia.node import Node
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from config import (
-    BOOTSTRAP_ADDR,
-    NODE_A_ADDR,
-    NODE_A_ID,
-    NODE_A_META,
-    NODE_B_ADDR,
-    NODE_B_ID,
-    NODE_B_META,
-    RELAY_URI,
-    STUN_HOST,
-    STUN_PORT,
-)
+from config import *
 from relay_manager import RelayManager
 
 
@@ -58,7 +47,7 @@ async def ping_node_b(server: RelayAwareServer):
     logging.info("=" * 80)
 
     # Get nodeB with metadata from routing table (crawled) or fallback
-    node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
+    node_b = get_node_with_metadata(server, NODE_B_ID)
 
     try:
         result = await server.protocol.call_ping(node_b)
@@ -78,7 +67,7 @@ async def send_sample_data(server: RelayAwareServer):
     """
     await asyncio.sleep(3)
     # Get nodeB with metadata from routing table (crawled) or fallback
-    node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
+    node_b = get_node_with_metadata(server, NODE_B_ID)
     payload = {"type": "text", "message": "Hello from nodeA"}
 
     try:
@@ -99,7 +88,7 @@ async def send_sample_file(server: RelayAwareServer):
     """
     await asyncio.sleep(4)
     # Get nodeB with metadata from routing table (crawled) or fallback
-    node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
+    node_b = get_node_with_metadata(server, NODE_B_ID)
     sample_path = Path("test.png")
     if not sample_path.exists():
         logging.warning("Sample file %s not found, skipping send_file test", sample_path)
@@ -111,8 +100,8 @@ async def send_sample_file(server: RelayAwareServer):
         logging.exception("send_file raised an exception")
 
 
-async def build_metadata(base_meta):
-    meta = dict(base_meta)
+async def build_metadata():
+    meta = dict()
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
         logging.info(
@@ -141,14 +130,10 @@ async def build_metadata(base_meta):
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    meta = await build_metadata(NODE_A_META)
-    relay_manager = None
-    if meta.get("use_relay"):
-        if not RELAY_URI:
-            logging.warning("Relay URI not configured; cannot enable relay despite NAT")
-        else:
-            relay_manager = RelayManager(meta.get("node_id", "nodeA"), RELAY_URI)
-            logging.info("Relay enabled for nodeA via %s", RELAY_URI)
+    meta = await build_metadata()
+
+    relay_manager = RelayManager(meta.get("node_id", "nodeA"), RELAY_URI)
+    logging.info("Relay enabled for nodeA via %s", RELAY_URI)
 
     server = RelayAwareServer(node_id=NODE_A_ID, relay_manager=relay_manager)
     server.node.meta = meta

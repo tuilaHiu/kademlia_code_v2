@@ -4,15 +4,7 @@ from pathlib import Path
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from config import (
-    BOOTSTRAP_ADDR,
-    NODE_B_ADDR,
-    NODE_B_ID,
-    NODE_B_META,
-    RELAY_URI,
-    STUN_HOST,
-    STUN_PORT,
-)
+from config import *
 from relay_manager import RelayManager
 
 
@@ -33,8 +25,8 @@ def handle_incoming_file(source, file_name, file_bytes, transfer_id):
         logging.exception("nodeB failed to store file '%s'", file_name)
 
 
-async def build_metadata(base_meta):
-    meta = dict(base_meta)
+async def build_metadata():
+    meta = dict()
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
         logging.info(
@@ -64,7 +56,7 @@ async def build_metadata(base_meta):
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    meta = await build_metadata(NODE_B_META)
+    meta = await build_metadata()
     relay_manager = RelayManager(meta.get("node_id", "nodeB"), RELAY_URI) if RELAY_URI else None
 
     server = RelayAwareServer(node_id=NODE_B_ID, relay_manager=relay_manager)
