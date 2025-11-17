@@ -16,7 +16,7 @@ from kademlia.utils import digest
 BOOTSTRAP_HOST = os.getenv("BOOTSTRAP_HOST", "146.190.94.139")
 BOOTSTRAP_PORT = 8468
 
-NODE_A_HOST = os.getenv("NODE_A_HOST", "192.168.193.28")
+NODE_A_HOST = os.getenv("NODE_A_HOST", "0.0.0.0")
 NODE_A_PORT = 8469
 
 NODE_B_HOST = os.getenv("NODE_B_HOST", "0.0.0.0")
