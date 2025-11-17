@@ -3,19 +3,12 @@ import logging
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
-from config import (
-    BOOTSTRAP_ADDR,
-    BOOTSTRAP_META,
-    BOOTSTRAP_NODE_ID,
-    RELAY_URI,
-    STUN_HOST,
-    STUN_PORT,
-)
+from config import *
 from relay_manager import RelayManager
 
 
-async def build_metadata(base_meta):
-    meta = dict(base_meta)
+async def build_metadata():
+    meta = dict()
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
         logging.info(
@@ -44,7 +37,7 @@ async def build_metadata(base_meta):
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    meta = await build_metadata(BOOTSTRAP_META)
+    meta = await build_metadata()
     relay_manager = RelayManager(meta.get("node_id", "bootstrap"), RELAY_URI) if RELAY_URI else None
 
     server = RelayAwareServer(node_id=BOOTSTRAP_NODE_ID, relay_manager=relay_manager)
