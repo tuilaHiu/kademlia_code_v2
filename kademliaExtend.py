@@ -1,4 +1,5 @@
 import asyncio
+from asyncio.log import logger
 import json
 import logging
 import math
@@ -180,8 +181,8 @@ class RelayAwareProtocol(KademliaProtocol):
             if meta_source is not None:
                 setattr(self.source_node, "meta", meta_source)
 
-            use_relay = self._should_use_relay(meta_target) and self.server is not None
-
+            use_relay = self._should_use_relay(meta_source) and self.server is not None
+            logger.info(f"Use_relay={use_relay}")
             if use_relay:
                 if not self.server or not self.server.has_relay():
                     log.warning(
@@ -430,6 +431,7 @@ class RelayAwareServer(Server):
         self.file_handler: Optional[Callable[[Node, str, bytes, str], Any]] = None
         self._incoming_files: Dict[Tuple[int, str], Dict[str, Any]] = {}
         self.received_dir = Path("received_files")
+        self.known_contact_meta: Dict[Tuple[str, int], Dict[str, Any]] = {}
         try:
             self.received_dir.mkdir(exist_ok=True)
         except Exception:
@@ -452,6 +454,24 @@ class RelayAwareServer(Server):
         await super().listen(port, interface)
         if self.relay_manager:
             await self.start_relay_listener()
+
+    def register_known_contact_meta(self, address: Tuple[str, int], meta: Dict[str, Any]) -> None:
+        """
+        Lưu metadata tĩnh cho contact biết trước (ví dụ bootstrap) để dùng khi gửi qua relay.
+        """
+        if not isinstance(address, tuple) or len(address) != 2:
+            raise ValueError("address must be a (host, port) tuple")
+        if not isinstance(meta, dict):
+            raise ValueError("meta must be a dict")
+        self.known_contact_meta[address] = meta
+
+    async def bootstrap_node(self, addr):
+        node = await super().bootstrap_node(addr)
+        preset_meta = self.known_contact_meta.get(addr)
+        if node and preset_meta:
+            setattr(node, "meta", preset_meta)
+            self.protocol.node_metadata_cache[node.id] = preset_meta
+        return node
 
     async def start_relay_listener(self):
         """
