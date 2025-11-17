@@ -21,7 +21,7 @@ from config import (
 from relay_manager import RelayManager
 
 
-def get_node_with_metadata(server: RelayAwareServer, node_id: bytes, fallback_addr: tuple, fallback_meta: dict) -> Node:
+def get_node_with_metadata(server: RelayAwareServer, node_id: bytes) -> Node:
     """
     Lấy node từ routing table (đã có metadata từ crawling) hoặc tạo mới với fallback.
     """
@@ -40,11 +40,6 @@ def get_node_with_metadata(server: RelayAwareServer, node_id: bytes, fallback_ad
                 else:
                     logging.warning(f"Found node {node_id.hex()[:8]} but no metadata, using fallback")
                     break
-
-    # Not found or no metadata - create new with fallback
-    logging.info(f"Node {node_id.hex()[:8]} not in routing table, creating with fallback metadata")
-    node = Node(node_id, fallback_addr[0], fallback_addr[1])
-    node.meta = fallback_meta
     return node
 
 
@@ -54,6 +49,13 @@ async def ping_node_b(server: RelayAwareServer):
     """
     logging.info("Waiting 0.5 seconds before sending ping to nodeB...")
     await asyncio.sleep(0.5)
+
+    # DEBUG: In ra metadata cache sau bootstrap
+    logging.info("=" * 80)
+    logging.info("METADATA CACHE CHECK (sau bootstrap):")
+    for node_id, meta in server.protocol.node_metadata_cache.items():
+        logging.info(f"  Node {node_id.hex()[:16]}... → metadata: {meta}")
+    logging.info("=" * 80)
 
     # Get nodeB with metadata from routing table (crawled) or fallback
     node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
@@ -159,8 +161,8 @@ async def main():
     logging.info("nodeA bootstrapped via %s:%s", *BOOTSTRAP_ADDR)
 
     asyncio.create_task(ping_node_b(server))
-    asyncio.create_task(send_sample_data(server))
-    asyncio.create_task(send_sample_file(server))
+    # asyncio.create_task(send_sample_data(server))
+    # asyncio.create_task(send_sample_file(server))
 
     try:
         while True:
