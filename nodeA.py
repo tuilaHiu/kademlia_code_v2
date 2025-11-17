@@ -52,8 +52,8 @@ async def ping_node_b(server: RelayAwareServer):
     """
     Gửi RPC ping từ nodeA tới nodeB để kiểm tra đường truyền.
     """
-    logging.info("Waiting 2 seconds before sending ping to nodeB...")
-    await asyncio.sleep(2)
+    logging.info("Waiting 0.5 seconds before sending ping to nodeB...")
+    await asyncio.sleep(0.5)
 
     # Get nodeB with metadata from routing table (crawled) or fallback
     node_b = get_node_with_metadata(server, NODE_B_ID, NODE_B_ADDR, NODE_B_META)
