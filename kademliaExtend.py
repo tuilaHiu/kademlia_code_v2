@@ -466,11 +466,23 @@ class RelayAwareServer(Server):
         self.known_contact_meta[address] = meta
 
     async def bootstrap_node(self, addr):
-        node = await super().bootstrap_node(addr)
-        preset_meta = self.known_contact_meta.get(addr)
-        if node and preset_meta:
-            setattr(node, "meta", preset_meta)
-            self.protocol.node_metadata_cache[node.id] = preset_meta
+        """
+        Override bootstrap_node để đảm bảo ping đầu tiên cũng đi qua đường relay/metadata.
+        """
+        host, port = addr
+        meta_target = self.known_contact_meta.get(addr)
+        meta_source = getattr(self.node, "meta", None)
+        try:
+            result = await self.protocol.ping(addr, self.node.id, meta_target, meta_source)
+        except Exception:
+            log.exception("[RelayAwareServer] bootstrap ping failed for %s:%s", host, port)
+            return None
+        if not result or not result[0]:
+            return None
+        node = Node(result[1], host, port)
+        if meta_target:
+            setattr(node, "meta", meta_target)
+            self.protocol.node_metadata_cache[node.id] = meta_target
         return node
 
     async def start_relay_listener(self):
