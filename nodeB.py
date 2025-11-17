@@ -50,6 +50,7 @@ async def build_metadata():
         meta["use_relay"] = True
     if RELAY_URI:
         meta["relay_uri"] = RELAY_URI
+    print(meta)
     return meta
 
 
@@ -63,6 +64,12 @@ async def main():
     server.node.meta = meta
     server.register_data_handler(handle_incoming_data)
     server.register_file_handler(handle_incoming_file)
+    # Khai báo metadata biết trước của bootstrap để khi gửi qua relay có node_id chính xác.
+    bootstrap_meta = {"node_id": "bootstrap"}
+    if RELAY_URI:
+        bootstrap_meta["relay_uri"] = RELAY_URI
+    bootstrap_meta["use_relay"] = True
+    server.register_known_contact_meta(BOOTSTRAP_ADDR, bootstrap_meta)
 
     host, port = NODE_B_ADDR
     await server.listen(port, interface=host)

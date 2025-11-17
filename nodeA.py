@@ -140,6 +140,11 @@ async def main():
 
     host, port = NODE_A_ADDR
     await server.listen(port, interface=host)
+    bootstrap_meta = {"node_id": "bootstrap"}
+    if RELAY_URI:
+        bootstrap_meta["relay_uri"] = RELAY_URI
+    bootstrap_meta["use_relay"] = True
+    server.register_known_contact_meta(BOOTSTRAP_ADDR, bootstrap_meta)
     logging.info("nodeA listening on %s:%s", host, port)
 
     await server.bootstrap([BOOTSTRAP_ADDR])

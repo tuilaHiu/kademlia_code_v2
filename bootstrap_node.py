@@ -38,6 +38,8 @@ async def main():
     logging.basicConfig(level=logging.INFO)
 
     meta = await build_metadata()
+    # Set node_id in metadata to ensure consistent relay routing
+    meta["node_id"] = "bootstrap"
     relay_manager = RelayManager(meta.get("node_id", "bootstrap"), RELAY_URI) if RELAY_URI else None
 
     server = RelayAwareServer(node_id=BOOTSTRAP_NODE_ID, relay_manager=relay_manager)
