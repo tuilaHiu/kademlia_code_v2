@@ -90,6 +90,12 @@ class RelayAwareProtocol(KademliaProtocol):
                 meta_target = args[-2]
         return meta_target, meta_source
 
+    def _get_node_meta(self, node: Node) -> Optional[Dict]:
+        meta = getattr(node, "meta", None)
+        if not meta:
+            meta = self.node_metadata_cache.get(node.id)
+        return meta
+
     def _should_use_relay(self, meta: Optional[Dict]) -> bool:
         if not isinstance(meta, dict):
             return False
@@ -106,8 +112,22 @@ class RelayAwareProtocol(KademliaProtocol):
 
     def _ensure_node_meta(self, node: Node, meta: Optional[Dict]) -> Node:
         if meta is not None:
+            preferred_ip = meta.get("external_ip") or meta.get("local_ip") or meta.get("ip") or node.ip
+            preferred_port = (
+                meta.get("listen_port")
+                if meta.get("listen_port") is not None
+                else meta.get("port")
+            )
+            if preferred_port is None:
+                preferred_port = node.port
+            node.ip = preferred_ip
+            node.port = preferred_port
+            meta["ip"] = preferred_ip
+            meta["port"] = preferred_port
+            if "listen_port" not in meta:
+                meta["listen_port"] = preferred_port
             setattr(node, "meta", meta)
-            # Also store in cache para persistence
+            # Also store in cache for persistence
             self.node_metadata_cache[node.id] = meta
         return node
 
@@ -122,11 +142,27 @@ class RelayAwareProtocol(KademliaProtocol):
         for item in nodelist:
             if isinstance(item, dict):
                 # Format mới với metadata
-                node = Node(item['id'], item['ip'], item['port'])
-                if 'meta' in item and item['meta']:
-                    setattr(node, 'meta', item['meta'])
+                meta = item.get('meta') or {}
+                preferred_ip = (
+                    meta.get('external_ip')
+                    or meta.get('local_ip')
+                    or meta.get('ip')
+                    or item.get('ip')
+                )
+                preferred_port = meta.get('listen_port')
+                if preferred_port is None:
+                    preferred_port = meta.get('port')
+                if preferred_port is None:
+                    preferred_port = item.get('port')
+                node = Node(item['id'], preferred_ip, preferred_port)
+                if meta:
+                    meta['ip'] = preferred_ip
+                    meta['port'] = preferred_port
+                    if 'listen_port' not in meta:
+                        meta['listen_port'] = preferred_port
+                    setattr(node, 'meta', meta)
                     # Also cache the metadata
-                    self.node_metadata_cache[node.id] = item['meta']
+                    self.node_metadata_cache[node.id] = meta
                 result.append(node)
             elif isinstance(item, (tuple, list)) and len(item) >= 3:
                 # Format cũ: tuple (id, ip, port)
@@ -340,7 +376,7 @@ class RelayAwareProtocol(KademliaProtocol):
     # ------------------------------------------------------------------ #
     async def call_find_node(self, node_to_ask, node_to_find):
         address = (node_to_ask.ip, node_to_ask.port)
-        meta_target = getattr(node_to_ask, "meta", None)
+        meta_target = self._get_node_meta(node_to_ask)
         meta_source = getattr(self.source_node, "meta", None)
         result = await self.find_node(
             address, self.source_node.id, node_to_find.id, meta_target, meta_source
@@ -349,7 +385,7 @@ class RelayAwareProtocol(KademliaProtocol):
 
     async def call_find_value(self, node_to_ask, node_to_find):
         address = (node_to_ask.ip, node_to_ask.port)
-        meta_target = getattr(node_to_ask, "meta", None)
+        meta_target = self._get_node_meta(node_to_ask)
         meta_source = getattr(self.source_node, "meta", None)
         result = await self.find_value(
             address, self.source_node.id, node_to_find.id, meta_target, meta_source
@@ -358,14 +394,14 @@ class RelayAwareProtocol(KademliaProtocol):
 
     async def call_ping(self, node_to_ask):
         address = (node_to_ask.ip, node_to_ask.port)
-        meta_target = getattr(node_to_ask, "meta", None)
+        meta_target = self._get_node_meta(node_to_ask)
         meta_source = getattr(self.source_node, "meta", None)
         result = await self.ping(address, self.source_node.id, meta_target, meta_source)
         return self.handle_call_response(result, node_to_ask)
 
     async def call_store(self, node_to_ask, key, value):
         address = (node_to_ask.ip, node_to_ask.port)
-        meta_target = getattr(node_to_ask, "meta", None)
+        meta_target = self._get_node_meta(node_to_ask)
         meta_source = getattr(self.source_node, "meta", None)
         result = await self.store(
             address, self.source_node.id, key, value, meta_target, meta_source
@@ -374,7 +410,7 @@ class RelayAwareProtocol(KademliaProtocol):
 
     async def call_send_data(self, node_to_ask, payload):
         address = (node_to_ask.ip, node_to_ask.port)
-        meta_target = getattr(node_to_ask, "meta", None)
+        meta_target = self._get_node_meta(node_to_ask)
         meta_source = getattr(self.source_node, "meta", None)
         result = await self.send_data(
             address, self.source_node.id, payload, meta_target, meta_source
@@ -452,6 +488,10 @@ class RelayAwareServer(Server):
 
     async def listen(self, port, interface="0.0.0.0"):
         await super().listen(port, interface)
+        meta = getattr(self.node, "meta", None)
+        if isinstance(meta, dict):
+            meta["listen_port"] = port
+            setattr(self.node, "meta", meta)
         if self.relay_manager:
             await self.start_relay_listener()
 
