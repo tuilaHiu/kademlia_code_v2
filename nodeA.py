@@ -101,7 +101,7 @@ async def send_sample_file(server: RelayAwareServer):
 
 
 async def build_metadata():
-    meta = dict()
+    meta = {"node_id": "nodeA"}
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
         logging.info(
@@ -152,7 +152,7 @@ async def main():
 
     asyncio.create_task(ping_node_b(server))
     # asyncio.create_task(send_sample_data(server))
-    # asyncio.create_task(send_sample_file(server))
+    asyncio.create_task(send_sample_file(server))
 
     try:
         while True:

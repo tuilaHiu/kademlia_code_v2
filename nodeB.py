@@ -25,8 +25,8 @@ def handle_incoming_file(source, file_name, file_bytes, transfer_id):
         logging.exception("nodeB failed to store file '%s'", file_name)
 
 
-async def build_metadata():
-    meta = dict()
+async def build_metadata(node_id: str):
+    meta = dict(node_id=node_id)
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
         logging.info(
@@ -57,7 +57,7 @@ async def build_metadata():
 async def main():
     logging.basicConfig(level=logging.INFO)
 
-    meta = await build_metadata()
+    meta = await build_metadata("nodeB")
     relay_manager = RelayManager(meta.get("node_id", "nodeB"), RELAY_URI) if RELAY_URI else None
 
     server = RelayAwareServer(node_id=NODE_B_ID, relay_manager=relay_manager)
