@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+kademlia
+aiofiles
+pymongo
+base58
+aiohttp
+pystun3
+python-multipart
