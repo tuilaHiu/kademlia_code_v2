@@ -1,4 +1,7 @@
 kademlia==2.2.3
+pymongo==4.6.1
+base58==2.1.1
+aiohttp==3.9.5
 pystun3==2.0.0
 rpcudp==5.0.1
 startrek==2.2.2

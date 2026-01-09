@@ -1,13 +1,24 @@
+"""Entry point for the bootstrap node with temporary login."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import Any, Dict
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
 from config import *
 from relay_manager import RelayManager
+from peer_login import login_and_register_peer, resolve_advertised_ip
 
 
-async def build_metadata():
+async def build_metadata() -> Dict[str, Any]:
+    """Build metadata for the bootstrap node based on NAT detection.
+
+    Returns:
+        Metadata dictionary for the bootstrap node.
+    """
     meta = dict()
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
@@ -34,10 +45,13 @@ async def build_metadata():
     return meta
 
 
-async def main():
+async def main() -> None:
+    """Run the bootstrap node with relay-aware Kademlia and login."""
     logging.basicConfig(level=logging.INFO)
 
     meta = await build_metadata()
+    advertised_ip = resolve_advertised_ip(meta, BOOTSTRAP_ADDR[0])
+    await login_and_register_peer(advertised_ip, BOOTSTRAP_ADDR[1])
     # Set node_id in metadata to ensure consistent relay routing
     meta["node_id"] = "bootstrap"
     relay_manager = RelayManager(meta.get("node_id", "bootstrap"), RELAY_URI) if RELAY_URI else None

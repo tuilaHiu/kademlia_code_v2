@@ -1,18 +1,43 @@
+"""Entry point for nodeB with relay-aware Kademlia and temporary login."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any, Dict
 
 from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
 from config import *
 from relay_manager import RelayManager
+from peer_login import login_and_register_peer, resolve_advertised_ip
 
 
-def handle_incoming_data(source, payload):
+def handle_incoming_data(source: tuple[str, int] | str, payload: object) -> None:
+    """Handle incoming data messages.
+
+    Args:
+        source: Source node address.
+        payload: Payload received from the network.
+    """
     logging.info("nodeB received data from %s: %r", source, payload)
 
 
-def handle_incoming_file(source, file_name, file_bytes, transfer_id):
+def handle_incoming_file(
+    source: tuple[str, int] | str,
+    file_name: str,
+    file_bytes: bytes,
+    transfer_id: str,
+) -> None:
+    """Handle incoming file transfer data.
+
+    Args:
+        source: Source node address.
+        file_name: Original file name.
+        file_bytes: Raw file bytes.
+        transfer_id: Transfer identifier.
+    """
     target_dir = Path("received_files")
     target_dir.mkdir(exist_ok=True)
     target_path = target_dir / f"{transfer_id}_{file_name}"
@@ -25,7 +50,15 @@ def handle_incoming_file(source, file_name, file_bytes, transfer_id):
         logging.exception("nodeB failed to store file '%s'", file_name)
 
 
-async def build_metadata(node_id: str):
+async def build_metadata(node_id: str) -> Dict[str, Any]:
+    """Build metadata for nodeB based on NAT detection.
+
+    Args:
+        node_id: Node identifier to embed in metadata.
+
+    Returns:
+        Metadata dictionary for nodeB.
+    """
     meta = dict(node_id=node_id)
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
@@ -54,10 +87,13 @@ async def build_metadata(node_id: str):
     return meta
 
 
-async def main():
+async def main() -> None:
+    """Run nodeB with relay-aware Kademlia and temporary login."""
     logging.basicConfig(level=logging.INFO)
 
     meta = await build_metadata("nodeB")
+    advertised_ip = resolve_advertised_ip(meta, NODE_B_ADDR[0])
+    await login_and_register_peer(advertised_ip, NODE_B_ADDR[1])
     relay_manager = RelayManager(meta.get("node_id", "nodeB"), RELAY_URI) if RELAY_URI else None
 
     server = RelayAwareServer(node_id=NODE_B_ID, relay_manager=relay_manager)

@@ -46,4 +46,13 @@ RELAY_URI = os.getenv("RELAY_URI", f"ws://{RELAY_HOST}:{RELAY_PORT}")
 STUN_HOST = os.getenv("STUN_HOST", "stun.l.google.com")
 STUN_PORT = int(os.getenv("STUN_PORT", "19302"))
 
+# ============================================================================
+# Legacy-style login/monitoring configuration
+# ============================================================================
+
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DB_NAME", "p2p_storage")
+COLLECTION_NAME = os.getenv("COLLECTION_NAME", "peers")
+DEFAULT_PASSWORD = os.getenv("DEFAULT_PASSWORD", "123456789")
+MONITORING_SERVER_URL = os.getenv("MONITORING_SERVER_URL", "http://localhost:8001")
 

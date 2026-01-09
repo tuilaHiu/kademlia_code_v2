@@ -1,6 +1,11 @@
+"""Entry point for nodeA with relay-aware Kademlia and temporary login."""
+
+from __future__ import annotations
+
 import asyncio
 import logging
 from pathlib import Path
+from typing import Any, Dict
 
 from kademlia.node import Node
 
@@ -8,11 +13,18 @@ from kademliaExtend import RelayAwareServer
 from nat_utils import detect_nat_info
 from config import *
 from relay_manager import RelayManager
+from peer_login import login_and_register_peer, resolve_advertised_ip
 
 
 def get_node_with_metadata(server: RelayAwareServer, node_id: bytes) -> Node:
-    """
-    Lấy node từ routing table (đã có metadata từ crawling) hoặc tạo mới với fallback.
+    """Get node from routing table (with metadata if available).
+
+    Args:
+        server: Relay-aware server instance.
+        node_id: Target node ID.
+
+    Returns:
+        Node from the routing table or a fallback node.
     """
     # Try to find in routing table first
     for bucket in server.protocol.router.buckets:
@@ -32,9 +44,11 @@ def get_node_with_metadata(server: RelayAwareServer, node_id: bytes) -> Node:
     return node
 
 
-async def ping_node_b(server: RelayAwareServer):
-    """
-    Gửi RPC ping từ nodeA tới nodeB để kiểm tra đường truyền.
+async def ping_node_b(server: RelayAwareServer) -> None:
+    """Send RPC ping from nodeA to nodeB to check connectivity.
+
+    Args:
+        server: Relay-aware server instance.
     """
     logging.info("Waiting 0.5 seconds before sending ping to nodeB...")
     await asyncio.sleep(0.5)
@@ -61,9 +75,11 @@ async def ping_node_b(server: RelayAwareServer):
         logging.warning("Ping failed or timed out, result=%s", result)
 
 
-async def send_sample_data(server: RelayAwareServer):
-    """
-    Gửi dữ liệu JSON đơn giản tới nodeB qua send_data.
+async def send_sample_data(server: RelayAwareServer) -> None:
+    """Send a simple JSON payload to nodeB via send_data.
+
+    Args:
+        server: Relay-aware server instance.
     """
     await asyncio.sleep(3)
     # Get nodeB with metadata from routing table (crawled) or fallback
@@ -82,9 +98,11 @@ async def send_sample_data(server: RelayAwareServer):
         logging.warning("send_data failed, result=%s", result)
 
 
-async def send_sample_file(server: RelayAwareServer):
-    """
-    Gửi file mẫu tới nodeB bằng cách chia thành nhiều chunk send_data.
+async def send_sample_file(server: RelayAwareServer) -> None:
+    """Send a sample file to nodeB using chunked send_data.
+
+    Args:
+        server: Relay-aware server instance.
     """
     await asyncio.sleep(4)
     # Get nodeB with metadata from routing table (crawled) or fallback
@@ -100,7 +118,12 @@ async def send_sample_file(server: RelayAwareServer):
         logging.exception("send_file raised an exception")
 
 
-async def build_metadata():
+async def build_metadata() -> Dict[str, Any]:
+    """Build metadata for nodeA based on NAT detection.
+
+    Returns:
+        Metadata dictionary for nodeA.
+    """
     meta = {"node_id": "nodeA"}
     try:
         nat_info = await detect_nat_info(stun_host=STUN_HOST, stun_port=STUN_PORT)
@@ -127,10 +150,13 @@ async def build_metadata():
     return meta
 
 
-async def main():
+async def main() -> None:
+    """Run nodeA with relay-aware Kademlia and temporary login."""
     logging.basicConfig(level=logging.INFO)
 
     meta = await build_metadata()
+    advertised_ip = resolve_advertised_ip(meta, NODE_A_ADDR[0])
+    await login_and_register_peer(advertised_ip, NODE_A_ADDR[1])
 
     relay_manager = RelayManager(meta.get("node_id", "nodeA"), RELAY_URI)
     logging.info("Relay enabled for nodeA via %s", RELAY_URI)
